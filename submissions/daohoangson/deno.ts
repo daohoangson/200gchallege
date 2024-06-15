@@ -15,22 +15,44 @@ import bf from "npm:bloom-filters@3.0.2";
   const filter = new bf.BloomFilter(8 * 8 * 1024 * 1024 * 1024, 8);
 
   const file = await Deno.open(path, { read: true });
-  const candidates: string[] = [];
+  let lineNumber = 0;
   for await (const line of readLines(file)) {
+    lineNumber++;
     if (filter.has(line)) {
-      candidates.push(line);
+      // we are pretty confident but cannot trust the filter because of false positives
+      await exitIfExactMatch(file, lineNumber, line);
     } else {
       filter.add(line);
     }
   }
-
-  // naive implementation: read the file again to find the exact match
-  // we are pretty confident but cannot trust the filter because of false positives
-  file.seek(0, Deno.SeekMode.Start);
-  for await (const line of readLines(file)) {
-    if (candidates.includes(line)) {
-      console.log(line);
-      return;
-    }
-  }
 })();
+
+async function exitIfExactMatch(
+  file: Deno.FsFile,
+  candidateLineNumber: number,
+  candidate: string
+): Promise<void> {
+  const originalPosition = await file.seek(0, Deno.SeekMode.Current);
+
+  try {
+    // start looking from the start of the file
+    await file.seek(0, Deno.SeekMode.Start);
+
+    let lineNumber = 0;
+    for await (const line of readLines(file)) {
+      lineNumber++;
+      if (lineNumber >= candidateLineNumber) {
+        // we have reached the candidate line, false positives confirmed 😢
+        return;
+      }
+      if (line === candidate) {
+        console.log(line);
+        Deno.exit(0); // success 🎉
+      }
+    }
+  } finally {
+    // restore the original position in case an exact match could not be found
+    // this will allow the main loop to continue from where it left off
+    await file.seek(originalPosition, Deno.SeekMode.Start);
+  }
+}
